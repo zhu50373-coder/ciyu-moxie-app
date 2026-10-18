@@ -1419,19 +1419,23 @@
 
   async function fetchPaddleAsset(fileName, asText = false) {
     const urls = [
-      `./models/ppocr_v5_mobile/${fileName}`,
       `https://cdn.jsdelivr.net/gh/zhu50373-coder/ciyu-moxie-app@main/models/ppocr_v5_mobile/${fileName}`,
+      `./models/ppocr_v5_mobile/${fileName}`,
     ];
     let lastError;
 
     for (const url of urls) {
+      const controller = new AbortController();
+      const timeoutId = window.setTimeout(() => controller.abort(), 45000);
       try {
-        const response = await fetch(url, { cache: "force-cache" });
+        const response = await fetch(url, { cache: "force-cache", signal: controller.signal });
         if (response.ok) {
           return asText ? response.text() : response.arrayBuffer();
         }
       } catch (error) {
         lastError = error;
+      } finally {
+        window.clearTimeout(timeoutId);
       }
     }
 
@@ -1439,10 +1443,14 @@
   }
 
   async function loadPaddleModules() {
-    const [paddleModule, ort] = await Promise.all([
+    const modules = Promise.all([
       import("https://cdn.jsdelivr.net/npm/paddleocr@1.2.0/dist/index.mjs"),
-      import("https://cdn.jsdelivr.net/npm/onnxruntime-web@1.22.0/dist/ort.min.mjs"),
+      import("https://cdn.jsdelivr.net/npm/onnxruntime-web@1.22.0/dist/ort.wasm.min.mjs"),
     ]);
+    const timeout = new Promise((_, reject) => {
+      window.setTimeout(() => reject(new Error("识别引擎加载超时。")), 60000);
+    });
+    const [paddleModule, ort] = await Promise.race([modules, timeout]);
     return { paddleModule, ort };
   }
 
