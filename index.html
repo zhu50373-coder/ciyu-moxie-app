@@ -296,6 +296,8 @@
                 <i class="spin" data-lucide="loader-circle"></i>
                 <span id="ocrProgressText">正在识别</span>
               </div>
+              <div class="ocr-crop-overlay" id="ocrCropOverlay" hidden></div>
+              <div class="ocr-crop-box" id="ocrCropBox" hidden></div>
             </div>
 
             <div class="capture-actions">
@@ -310,6 +312,17 @@
               <button class="ghost-button capture-button" id="retakePhotoButton" type="button" hidden>
                 <i data-lucide="rotate-ccw"></i>
                 <span>重拍</span>
+              </button>
+              <button class="ghost-button capture-button" id="cropOcrButton" type="button" hidden>
+                <i data-lucide="crop"></i>
+                <span>框选区域</span>
+              </button>
+              <button class="ghost-button capture-button" id="cancelCropButton" type="button" hidden>
+                <span>取消框选</span>
+              </button>
+              <button class="primary-button capture-button" id="confirmCropButton" type="button" hidden>
+                <i data-lucide="scan-text"></i>
+                <span>识别此区域</span>
               </button>
             </div>
             <input id="ocrFileInput" type="file" accept="image/*" capture="environment" hidden />
