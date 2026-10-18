@@ -1456,10 +1456,12 @@
     return { paddleModule, ort };
   }
 
-  async function ensurePaddleEngine() {
+  async function ensurePaddleEngine(prewarm = false) {
     if (!paddleEnginePromise) {
       paddleEnginePromise = (async () => {
-        setOcrProgress("正在加载专业识别引擎", true);
+        if (!prewarm) {
+          setOcrProgress("正在加载专业识别引擎", true);
+        }
         const [{ paddleModule, ort }, detModel, recModel, dictionaryText] = await Promise.all([
           loadPaddleModules(),
           fetchPaddleAsset("PP-OCRv5_mobile_det_infer.onnx"),
@@ -1506,8 +1508,8 @@
       },
     });
     const processed = engine.processRecognition(result);
-    ocrCandidates = extractOcrCandidates(processed?.text || "", [], sourceCanvas.width);
-    if (ocrCandidates.length < 2) {
+    ocrCandidates = extractPaddleCandidates(processed, sourceCanvas.width, sourceCanvas.height);
+    if (ocrCandidates.length < 1) {
       throw new Error(`识别结果不足：${processed?.text || "无文字"}`);
     }
     renderOcrCandidates();
@@ -1529,6 +1531,48 @@
     renderOcrCandidates();
   }
 
+  function canvasToBlob(canvas, type = "image/jpeg", quality = 0.82) {
+    return new Promise((resolve, reject) => {
+      canvas.toBlob((blob) => {
+        if (blob) {
+          resolve(blob);
+        } else {
+          reject(new Error("图片压缩失败。"));
+        }
+      }, type, quality);
+    });
+  }
+
+  async function runCloudOcrRecognition() {
+    const sourceCanvas = ocrDisplayCanvas || ocrImageData;
+    const blob = await canvasToBlob(sourceCanvas, "image/jpeg", 0.82);
+    const formData = new FormData();
+    formData.append("apikey", "helloworld");
+    formData.append("language", "eng");
+    formData.append("scale", "true");
+    formData.append("OCREngine", "2");
+    formData.append("file", blob, "word-list.jpg");
+
+    const controller = new AbortController();
+    const timeoutId = window.setTimeout(() => controller.abort(), 15000);
+    const response = await fetch("https://api.ocr.space/parse/image", {
+      method: "POST",
+      body: formData,
+      signal: controller.signal,
+    }).finally(() => window.clearTimeout(timeoutId));
+
+    if (!response.ok) {
+      throw new Error("云端识别服务不可用。");
+    }
+    const payload = await response.json();
+    const text = payload?.ParsedResults?.[0]?.ParsedText || "";
+    ocrCandidates = extractOcrCandidates(text, [], sourceCanvas.width);
+    if (ocrCandidates.length < 1) {
+      throw new Error(`云端识别结果不足：${text || "无文字"}`);
+    }
+    renderOcrCandidates();
+  }
+
   async function runOcrRecognition() {
     if (!ocrImageData || ocrBusy) {
       return;
@@ -1539,12 +1583,18 @@
 
     try {
       try {
-        await runPaddleRecognition();
-      } catch (paddleError) {
-        console.warn("PaddleOCR fallback", paddleError);
-        paddleEnginePromise = null;
-        setOcrProgress("专业引擎不可用，正在切换基础识别", true);
-        await runTesseractRecognition();
+        setOcrProgress("正在云端识别", true);
+        await runCloudOcrRecognition();
+      } catch (cloudError) {
+        console.warn("Cloud OCR fallback", cloudError);
+        try {
+          await runPaddleRecognition();
+        } catch (paddleError) {
+          console.warn("PaddleOCR fallback", paddleError);
+          paddleEnginePromise = null;
+          setOcrProgress("专业引擎不可用，正在切换基础识别", true);
+          await runTesseractRecognition();
+        }
       }
     } catch (error) {
       ocrCandidates = [];
@@ -1651,6 +1701,70 @@
         const tokens = line.match(/[A-Za-z][A-Za-z'’-]{1,39}/g) || [];
         tokens.forEach((token) => addCandidate(token));
       });
+
+    return [...candidates.values()].slice(0, 120);
+  }
+
+  function extractPaddleCandidates(processed, imageWidth, imageHeight) {
+    const ignoredWords = new Set([
+      "a", "an", "the", "and", "or", "but", "of", "to", "in", "on", "at", "by", "for",
+      "with", "from", "as", "is", "are", "was", "were", "be", "been", "being", "this",
+      "that", "these", "those", "it", "its", "not", "no", "yes", "page", "unit", "lesson",
+      "chapter", "word", "words", "vocabulary", "example", "examples", "list", "english",
+      "complete", "oxford", "course", "reading", "writing", "spelling", "pronunciation",
+      "translation", "definition", "exercise", "exercises", "practice", "textbook",
+    ]);
+    const candidates = new Map();
+    const topMargin = imageHeight * 0.12;
+    const bottomMargin = imageHeight * 0.88;
+
+    function addCandidate(result) {
+      const value = normalizeTerm(result?.text || "")
+        .replace(/^[^A-Za-z]+/, "")
+        .replace(/[^A-Za-z'’-]+$/, "");
+      if (!/^[A-Za-z][A-Za-z'’-]{1,39}$/.test(value)) {
+        return;
+      }
+      if (/^[A-Z]{2,3}$/.test(value) || Number(result?.confidence) < 0.6) {
+        return;
+      }
+      const key = value.toLocaleLowerCase();
+      if (!ignoredWords.has(key) && !candidates.has(key)) {
+        candidates.set(key, value);
+      }
+    }
+
+    processed?.lines?.forEach((line) => {
+      const items = (line || [])
+        .filter(
+          (result) =>
+            result?.box &&
+            result.box.y >= topMargin &&
+            result.box.y + result.box.height <= bottomMargin &&
+            Number(result.confidence) >= 0.6,
+        )
+        .sort((first, second) => (first.box?.x || 0) - (second.box?.x || 0));
+
+      if (items.length === 0) {
+        return;
+      }
+
+      const first = items[0];
+      if (items.length === 1) {
+        addCandidate(first);
+        return;
+      }
+
+      const second = items[1];
+      const gap = (second.box?.x || 0) - ((first.box?.x || 0) + (first.box?.width || 0));
+      const leftColumnTerm = (first.box?.x || 0) < imageWidth * 0.52;
+      if (leftColumnTerm && gap > Math.max(20, imageWidth * 0.04)) {
+        addCandidate(first);
+        return;
+      }
+
+      items.forEach(addCandidate);
+    });
 
     return [...candidates.values()].slice(0, 120);
   }
