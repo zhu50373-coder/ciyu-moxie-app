@@ -11,6 +11,7 @@
     <title>默写单词 · 国内访问版</title>
     <link rel="stylesheet" href="./styles.css" />
     <script defer src="./assets/lucide.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js"></script>
     <script defer src="./app.js"></script>
   </head>
   <body>
@@ -42,7 +43,13 @@
                   <p class="eyebrow">词库编辑</p>
                   <h2 id="addTitle">添加单词</h2>
                 </div>
-                <span class="count-badge" id="libraryCount">0 个</span>
+                <div class="add-panel-actions">
+                  <button class="camera-launch-button" id="openOcrModalButton" type="button">
+                    <i data-lucide="scan-text"></i>
+                    <span>拍照识词</span>
+                  </button>
+                  <span class="count-badge" id="libraryCount">0 个</span>
+                </div>
               </div>
 
               <label class="sr-only" for="wordInput">单词与释义</label>
@@ -262,6 +269,80 @@
           </div>
         </section>
       </main>
+    </div>
+
+    <div class="modal-backdrop" id="ocrModal" hidden>
+      <section class="modal-panel ocr-modal" role="dialog" aria-modal="true" aria-labelledby="ocrModalTitle">
+        <div class="modal-header">
+          <div>
+            <p class="eyebrow">图片识别</p>
+            <h2 id="ocrModalTitle">拍照读取单词</h2>
+          </div>
+          <button class="icon-button" id="closeOcrModalButton" type="button" aria-label="关闭">
+            <i data-lucide="x"></i>
+          </button>
+        </div>
+
+        <div class="ocr-body">
+          <div class="ocr-capture">
+            <div class="camera-frame" id="ocrCameraFrame">
+              <video id="ocrVideo" playsinline muted autoplay></video>
+              <img id="ocrPreviewImage" hidden alt="待识别图片" />
+              <div class="camera-placeholder" id="ocrCameraPlaceholder">
+                <i data-lucide="camera"></i>
+                <span>相机预览</span>
+              </div>
+              <div class="ocr-progress" id="ocrProgress" hidden>
+                <i class="spin" data-lucide="loader-circle"></i>
+                <span id="ocrProgressText">正在识别</span>
+              </div>
+            </div>
+
+            <div class="capture-actions">
+              <button class="primary-button capture-button" id="capturePhotoButton" type="button">
+                <i data-lucide="camera"></i>
+                <span>拍照</span>
+              </button>
+              <button class="secondary-button capture-button" id="choosePhotoButton" type="button">
+                <i data-lucide="image-plus"></i>
+                <span>相册</span>
+              </button>
+              <button class="ghost-button capture-button" id="retakePhotoButton" type="button" hidden>
+                <i data-lucide="rotate-ccw"></i>
+                <span>重拍</span>
+              </button>
+            </div>
+            <input id="ocrFileInput" type="file" accept="image/*" capture="environment" hidden />
+          </div>
+
+          <div class="ocr-results">
+            <div class="ocr-results-heading">
+              <div>
+                <p class="eyebrow">识别内容</p>
+                <h3>选择单词</h3>
+              </div>
+              <span class="count-badge" id="ocrWordCount">0 个</span>
+            </div>
+            <div class="ocr-toolbar">
+              <button class="text-button" id="selectAllOcrWordsButton" type="button">全选</button>
+              <button class="text-button" id="clearOcrWordsButton" type="button">清空</button>
+            </div>
+            <div class="ocr-word-chips" id="ocrWordChips"></div>
+            <div class="ocr-empty" id="ocrEmpty">
+              <i data-lucide="scan-line"></i>
+              <span>识别结果会显示在这里</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="modal-footer">
+          <button class="ghost-button" id="cancelOcrButton" type="button">取消</button>
+          <button class="primary-button" id="addRecognizedWordsButton" type="button" disabled>
+            <i data-lucide="plus"></i>
+            <span>加入词库</span>
+          </button>
+        </div>
+      </section>
     </div>
 
     <div class="toast" id="toast" role="status" aria-live="polite"></div>
