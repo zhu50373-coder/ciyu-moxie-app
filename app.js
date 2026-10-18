@@ -1483,11 +1483,12 @@
 
   async function runPaddleRecognition() {
     const engine = await ensurePaddleEngine();
-    const context = ocrImageData.getContext("2d", { willReadFrequently: true });
-    const imageData = context.getImageData(0, 0, ocrImageData.width, ocrImageData.height);
+    const sourceCanvas = ocrDisplayCanvas || ocrImageData;
+    const context = sourceCanvas.getContext("2d", { willReadFrequently: true });
+    const imageData = context.getImageData(0, 0, sourceCanvas.width, sourceCanvas.height);
     const pixels = {
-      width: ocrImageData.width,
-      height: ocrImageData.height,
+      width: sourceCanvas.width,
+      height: sourceCanvas.height,
       data: new Uint8Array(imageData.data.buffer),
     };
     const letters = Array.from("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz'’'- ");
@@ -1503,9 +1504,9 @@
       },
     });
     const processed = engine.processRecognition(result);
-    ocrCandidates = extractOcrCandidates(processed?.text || "", [], ocrImageData.width);
+    ocrCandidates = extractOcrCandidates(processed?.text || "", [], sourceCanvas.width);
     if (ocrCandidates.length < 2) {
-      throw new Error("识别结果不足");
+      throw new Error(`识别结果不足：${processed?.text || "无文字"}`);
     }
     renderOcrCandidates();
   }
@@ -1538,6 +1539,7 @@
       try {
         await runPaddleRecognition();
       } catch (paddleError) {
+        console.warn("PaddleOCR fallback", paddleError);
         paddleEnginePromise = null;
         setOcrProgress("专业引擎不可用，正在切换基础识别", true);
         await runTesseractRecognition();
@@ -1645,7 +1647,7 @@
         }
 
         const tokens = line.match(/[A-Za-z][A-Za-z'’-]{1,39}/g) || [];
-        tokens.forEach(addCandidate);
+        tokens.forEach((token) => addCandidate(token));
       });
 
     return [...candidates.values()].slice(0, 120);
