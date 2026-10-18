@@ -11,6 +11,7 @@
     <title>默写单词 · 国内访问版</title>
     <link rel="stylesheet" href="./styles.css" />
     <script defer src="./assets/lucide.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js"></script>
     <script defer src="./app.js"></script>
   </head>
   <body>
@@ -43,7 +44,7 @@
                   <h2 id="addTitle">添加单词</h2>
                 </div>
                 <div class="add-panel-actions">
-                  <button class="camera-launch-button" id="openOcrModalButton" type="button" hidden>
+                  <button class="camera-launch-button" id="openOcrModalButton" type="button">
                     <i data-lucide="scan-text"></i>
                     <span>拍照识词</span>
                   </button>
