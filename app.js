@@ -20,10 +20,12 @@
   let lookupGeneration = 0;
   let lookupBusy = false;
   let ocrStream = null;
+  let ocrDisplayCanvas = null;
   let ocrImageData = null;
   let ocrCandidates = [];
   let ocrBusy = false;
   let ocrWorkerPromise = null;
+  let cropRect = null;
   const lookupCache = new Map();
 
   const elements = {
@@ -48,6 +50,12 @@
     capturePhotoButton: document.querySelector("#capturePhotoButton"),
     choosePhotoButton: document.querySelector("#choosePhotoButton"),
     retakePhotoButton: document.querySelector("#retakePhotoButton"),
+    cropOcrButton: document.querySelector("#cropOcrButton"),
+    cancelCropButton: document.querySelector("#cancelCropButton"),
+    confirmCropButton: document.querySelector("#confirmCropButton"),
+    ocrCropOverlay: document.querySelector("#ocrCropOverlay"),
+    ocrCropBox: document.querySelector("#ocrCropBox"),
+    ocrCameraFrame: document.querySelector("#ocrCameraFrame"),
     ocrFileInput: document.querySelector("#ocrFileInput"),
     ocrWordCount: document.querySelector("#ocrWordCount"),
     ocrWordChips: document.querySelector("#ocrWordChips"),
@@ -966,14 +974,22 @@
 
   function resetOcrCapture() {
     stopOcrStream();
+    ocrDisplayCanvas = null;
     ocrImageData = null;
     ocrCandidates = [];
+    cropRect = null;
     elements.ocrPreviewImage.hidden = true;
     elements.ocrPreviewImage.removeAttribute("src");
     elements.ocrVideo.hidden = false;
     elements.ocrCameraPlaceholder.hidden = false;
     elements.ocrCameraPlaceholder.querySelector("span").textContent = "相机预览";
     elements.retakePhotoButton.hidden = true;
+    elements.cropOcrButton.hidden = true;
+    elements.cancelCropButton.hidden = true;
+    elements.confirmCropButton.hidden = true;
+    elements.ocrCropOverlay.hidden = true;
+    elements.ocrCropBox.hidden = true;
+    elements.ocrCameraFrame.classList.remove("cropping");
     elements.capturePhotoButton.disabled = false;
     elements.ocrFileInput.value = "";
     elements.ocrWordChips.innerHTML = "";
@@ -1157,12 +1173,14 @@
   }
 
   function showOcrImage(displayCanvas, recognitionCanvas) {
+    ocrDisplayCanvas = displayCanvas;
     ocrImageData = recognitionCanvas || displayCanvas;
     elements.ocrPreviewImage.src = displayCanvas.toDataURL("image/jpeg", 0.92);
     elements.ocrPreviewImage.hidden = false;
     elements.ocrVideo.hidden = true;
     elements.ocrCameraPlaceholder.hidden = true;
     elements.retakePhotoButton.hidden = false;
+    elements.cropOcrButton.hidden = false;
     stopOcrStream();
   }
 
@@ -1204,11 +1222,168 @@
     image.src = objectUrl;
   }
 
+  function enterCropMode() {
+    if (!ocrDisplayCanvas || ocrBusy) {
+      return;
+    }
+
+    cropRect = null;
+    elements.ocrCameraFrame.classList.add("cropping");
+    elements.ocrCropOverlay.hidden = false;
+    elements.ocrCropBox.hidden = true;
+    elements.cropOcrButton.hidden = true;
+    elements.cancelCropButton.hidden = false;
+    elements.confirmCropButton.hidden = false;
+    elements.retakePhotoButton.hidden = true;
+    elements.choosePhotoButton.disabled = true;
+    elements.capturePhotoButton.disabled = true;
+  }
+
+  function exitCropMode() {
+    cropRect = null;
+    elements.ocrCameraFrame.classList.remove("cropping");
+    elements.ocrCropOverlay.hidden = true;
+    elements.ocrCropBox.hidden = true;
+    elements.cancelCropButton.hidden = true;
+    elements.confirmCropButton.hidden = true;
+    elements.cropOcrButton.hidden = !ocrDisplayCanvas;
+    elements.retakePhotoButton.hidden = !ocrDisplayCanvas;
+    elements.choosePhotoButton.disabled = ocrBusy;
+    elements.capturePhotoButton.disabled = ocrBusy;
+  }
+
+  function getRenderedImageRect() {
+    const frameWidth = elements.ocrCameraFrame.clientWidth;
+    const frameHeight = elements.ocrCameraFrame.clientHeight;
+    const naturalWidth = ocrDisplayCanvas?.width || 1;
+    const naturalHeight = ocrDisplayCanvas?.height || 1;
+    const scale = Math.min(frameWidth / naturalWidth, frameHeight / naturalHeight);
+    const renderedWidth = naturalWidth * scale;
+    const renderedHeight = naturalHeight * scale;
+    return {
+      scale,
+      offsetX: (frameWidth - renderedWidth) / 2,
+      offsetY: (frameHeight - renderedHeight) / 2,
+      renderedWidth,
+      renderedHeight,
+    };
+  }
+
+  function updateCropBox() {
+    if (!cropRect) {
+      elements.ocrCropBox.hidden = true;
+      return;
+    }
+
+    const left = Math.min(cropRect.x0, cropRect.x1);
+    const top = Math.min(cropRect.y0, cropRect.y1);
+    const width = Math.abs(cropRect.x1 - cropRect.x0);
+    const height = Math.abs(cropRect.y1 - cropRect.y0);
+    elements.ocrCropBox.style.left = `${left}px`;
+    elements.ocrCropBox.style.top = `${top}px`;
+    elements.ocrCropBox.style.width = `${width}px`;
+    elements.ocrCropBox.style.height = `${height}px`;
+    elements.ocrCropBox.hidden = width < 8 || height < 8;
+  }
+
+  function handleCropPointerDown(event) {
+    if (!ocrDisplayCanvas || ocrBusy || event.button !== 0) {
+      return;
+    }
+    const frameRect = elements.ocrCameraFrame.getBoundingClientRect();
+    const x = event.clientX - frameRect.left;
+    const y = event.clientY - frameRect.top;
+    cropRect = { x0: x, y0: y, x1: x, y1: y };
+    elements.ocrCropOverlay.setPointerCapture(event.pointerId);
+    updateCropBox();
+  }
+
+  function handleCropPointerMove(event) {
+    if (!cropRect || ocrBusy) {
+      return;
+    }
+    const frameRect = elements.ocrCameraFrame.getBoundingClientRect();
+    cropRect.x1 = Math.max(0, Math.min(frameRect.width, event.clientX - frameRect.left));
+    cropRect.y1 = Math.max(0, Math.min(frameRect.height, event.clientY - frameRect.top));
+    updateCropBox();
+  }
+
+  function handleCropPointerEnd() {
+    if (!cropRect) {
+      return;
+    }
+    const width = Math.abs(cropRect.x1 - cropRect.x0);
+    const height = Math.abs(cropRect.y1 - cropRect.y0);
+    if (width < 24 || height < 24) {
+      cropRect = null;
+      updateCropBox();
+    }
+  }
+
+  function confirmCropSelection() {
+    if (!cropRect || !ocrDisplayCanvas || ocrBusy) {
+      return;
+    }
+
+    const frameWidth = elements.ocrCameraFrame.clientWidth;
+    const frameHeight = elements.ocrCameraFrame.clientHeight;
+    const imageRect = getRenderedImageRect();
+    const left = Math.max(imageRect.offsetX, Math.min(cropRect.x0, cropRect.x1));
+    const right = Math.min(
+      imageRect.offsetX + imageRect.renderedWidth,
+      Math.max(cropRect.x0, cropRect.x1),
+    );
+    const top = Math.max(imageRect.offsetY, Math.min(cropRect.y0, cropRect.y1));
+    const bottom = Math.min(
+      imageRect.offsetY + imageRect.renderedHeight,
+      Math.max(cropRect.y0, cropRect.y1),
+    );
+    const sourceX = (left - imageRect.offsetX) / imageRect.scale;
+    const sourceY = (top - imageRect.offsetY) / imageRect.scale;
+    const sourceWidth = (right - left) / imageRect.scale;
+    const sourceHeight = (bottom - top) / imageRect.scale;
+
+    if (
+      right - left < 24 ||
+      bottom - top < 24 ||
+      sourceWidth < 1 ||
+      sourceHeight < 1
+    ) {
+      showToast("框选区域太小。", "error");
+      return;
+    }
+
+    const croppedCanvas = document.createElement("canvas");
+    croppedCanvas.width = Math.max(1, Math.round(sourceWidth));
+    croppedCanvas.height = Math.max(1, Math.round(sourceHeight));
+    croppedCanvas
+      .getContext("2d", { willReadFrequently: true })
+      .drawImage(
+        ocrDisplayCanvas,
+        sourceX,
+        sourceY,
+        sourceWidth,
+        sourceHeight,
+        0,
+        0,
+        croppedCanvas.width,
+        croppedCanvas.height,
+      );
+
+    const preparedCanvas = prepareOcrCanvas(croppedCanvas);
+    exitCropMode();
+    showOcrImage(croppedCanvas, preparedCanvas);
+    runOcrRecognition();
+  }
+
   function setOcrBusy(busy) {
     ocrBusy = busy;
     elements.capturePhotoButton.disabled = busy;
     elements.choosePhotoButton.disabled = busy;
     elements.retakePhotoButton.disabled = busy;
+    elements.cropOcrButton.disabled = busy;
+    elements.cancelCropButton.disabled = busy;
+    elements.confirmCropButton.disabled = busy;
     elements.closeOcrModalButton.disabled = busy;
     elements.cancelOcrButton.disabled = busy;
     elements.addRecognizedWordsButton.disabled =
@@ -1494,6 +1669,13 @@
     elements.cancelOcrButton.addEventListener("click", closeOcrModal);
     elements.capturePhotoButton.addEventListener("click", captureOcrPhoto);
     elements.choosePhotoButton.addEventListener("click", () => elements.ocrFileInput.click());
+    elements.cropOcrButton.addEventListener("click", enterCropMode);
+    elements.cancelCropButton.addEventListener("click", exitCropMode);
+    elements.confirmCropButton.addEventListener("click", confirmCropSelection);
+    elements.ocrCropOverlay.addEventListener("pointerdown", handleCropPointerDown);
+    elements.ocrCropOverlay.addEventListener("pointermove", handleCropPointerMove);
+    elements.ocrCropOverlay.addEventListener("pointerup", handleCropPointerEnd);
+    elements.ocrCropOverlay.addEventListener("pointercancel", exitCropMode);
     elements.retakePhotoButton.addEventListener("click", () => {
       resetOcrCapture();
       startOcrCamera();
