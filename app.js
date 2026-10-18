@@ -25,6 +25,7 @@
   let ocrCandidates = [];
   let ocrBusy = false;
   let ocrWorkerPromise = null;
+  let paddleEnginePromise = null;
   let cropRect = null;
   const lookupCache = new Map();
 
@@ -1416,6 +1417,107 @@
     return ocrWorkerPromise;
   }
 
+  async function fetchPaddleAsset(fileName, asText = false) {
+    const urls = [
+      `./models/ppocr_v5_mobile/${fileName}`,
+      `https://cdn.jsdelivr.net/gh/zhu50373-coder/ciyu-moxie-app@main/models/ppocr_v5_mobile/${fileName}`,
+    ];
+    let lastError;
+
+    for (const url of urls) {
+      try {
+        const response = await fetch(url, { cache: "force-cache" });
+        if (response.ok) {
+          return asText ? response.text() : response.arrayBuffer();
+        }
+      } catch (error) {
+        lastError = error;
+      }
+    }
+
+    throw lastError || new Error(`无法加载识别模型：${fileName}`);
+  }
+
+  async function loadPaddleModules() {
+    const [paddleModule, ort] = await Promise.all([
+      import("https://cdn.jsdelivr.net/npm/paddleocr@1.2.0/dist/index.mjs"),
+      import("https://cdn.jsdelivr.net/npm/onnxruntime-web@1.22.0/dist/ort.min.mjs"),
+    ]);
+    return { paddleModule, ort };
+  }
+
+  async function ensurePaddleEngine() {
+    if (!paddleEnginePromise) {
+      paddleEnginePromise = (async () => {
+        setOcrProgress("正在加载专业识别引擎", true);
+        const [{ paddleModule, ort }, detModel, recModel, dictionaryText] = await Promise.all([
+          loadPaddleModules(),
+          fetchPaddleAsset("PP-OCRv5_mobile_det_infer.onnx"),
+          fetchPaddleAsset("PP-OCRv5_mobile_rec_infer.onnx"),
+          fetchPaddleAsset("ppocrv5_dict.txt", true),
+        ]);
+
+        const charactersDictionary = [...dictionaryText.trimEnd().split(/\r?\n/), ""];
+        return paddleModule.PaddleOcrService.createInstance({
+          ort,
+          modelPreset: "PP-OCRv5_mobile",
+          detection: { modelBuffer: detModel },
+          recognition: {
+            modelBuffer: recModel,
+            charactersDictionary,
+          },
+        });
+      })();
+    }
+
+    return paddleEnginePromise;
+  }
+
+  async function runPaddleRecognition() {
+    const engine = await ensurePaddleEngine();
+    const context = ocrImageData.getContext("2d", { willReadFrequently: true });
+    const imageData = context.getImageData(0, 0, ocrImageData.width, ocrImageData.height);
+    const pixels = {
+      width: ocrImageData.width,
+      height: ocrImageData.height,
+      data: new Uint8Array(imageData.data.buffer),
+    };
+    const letters = Array.from("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz'’'- ");
+
+    const result = await engine.recognize(pixels, {
+      charWhiteList: letters,
+      onProgress(event) {
+        if (event.type === "det" && event.stage === "postprocess") {
+          setOcrProgress(`已检测到 ${event.detectedCount || 0} 处文字`, true);
+        } else if (event.type === "rec" && event.stage === "item") {
+          setOcrProgress("正在识别文字", true);
+        }
+      },
+    });
+    const processed = engine.processRecognition(result);
+    ocrCandidates = extractOcrCandidates(processed?.text || "", [], ocrImageData.width);
+    if (ocrCandidates.length < 2) {
+      throw new Error("识别结果不足");
+    }
+    renderOcrCandidates();
+  }
+
+  async function runTesseractRecognition() {
+    const worker = await ensureOcrWorker();
+    await worker.setParameters({
+      tessedit_pageseg_mode: window.Tesseract.PSM?.SPARSE_TEXT || "11",
+      preserve_interword_spaces: "1",
+      tessedit_char_whitelist: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz'’'- ",
+    });
+    const result = await worker.recognize(ocrImageData, {}, { text: true, blocks: true });
+    ocrCandidates = extractOcrCandidates(
+      result?.data?.text || "",
+      result?.data?.blocks || [],
+      ocrImageData.width,
+    );
+    renderOcrCandidates();
+  }
+
   async function runOcrRecognition() {
     if (!ocrImageData || ocrBusy) {
       return;
@@ -1425,19 +1527,13 @@
     setOcrProgress("正在准备识别", true);
 
     try {
-      const worker = await ensureOcrWorker();
-      await worker.setParameters({
-        tessedit_pageseg_mode: window.Tesseract.PSM?.SPARSE_TEXT || "11",
-        preserve_interword_spaces: "1",
-        tessedit_char_whitelist: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz'’'- ",
-      });
-      const result = await worker.recognize(ocrImageData, {}, { text: true, blocks: true });
-      ocrCandidates = extractOcrCandidates(
-        result?.data?.text || "",
-        result?.data?.blocks || [],
-        ocrImageData.width,
-      );
-      renderOcrCandidates();
+      try {
+        await runPaddleRecognition();
+      } catch (paddleError) {
+        paddleEnginePromise = null;
+        setOcrProgress("专业引擎不可用，正在切换基础识别", true);
+        await runTesseractRecognition();
+      }
     } catch (error) {
       ocrCandidates = [];
       renderOcrCandidates();
