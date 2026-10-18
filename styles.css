@@ -1365,6 +1365,29 @@ button:disabled {
   background: #101614;
 }
 
+.ocr-crop-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 4;
+  cursor: crosshair;
+  touch-action: none;
+}
+
+.ocr-crop-box {
+  position: absolute;
+  z-index: 5;
+  border: 2px solid #f3c34c;
+  background: rgba(243, 195, 76, 0.14);
+  box-shadow:
+    0 0 0 1px rgba(255, 255, 255, 0.38),
+    0 0 0 9999px rgba(7, 12, 10, 0.28);
+  pointer-events: none;
+}
+
+.camera-frame.cropping .ocr-crop-overlay {
+  background: rgba(7, 12, 10, 0.08);
+}
+
 .camera-placeholder {
   position: absolute;
   inset: 0;
