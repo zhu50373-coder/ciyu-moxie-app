@@ -1451,6 +1451,8 @@
       window.setTimeout(() => reject(new Error("识别引擎加载超时。")), 60000);
     });
     const [paddleModule, ort] = await Promise.race([modules, timeout]);
+    ort.env.wasm.numThreads = 1;
+    ort.env.wasm.wasmPaths = "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.22.0/dist/";
     return { paddleModule, ort };
   }
 
