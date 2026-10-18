@@ -19,6 +19,11 @@
   let lookupDebounceTimer = null;
   let lookupGeneration = 0;
   let lookupBusy = false;
+  let ocrStream = null;
+  let ocrImageData = null;
+  let ocrCandidates = [];
+  let ocrBusy = false;
+  let ocrWorkerPromise = null;
   const lookupCache = new Map();
 
   const elements = {
@@ -31,6 +36,25 @@
     wordInput: document.querySelector("#wordInput"),
     clearInputButton: document.querySelector("#clearInputButton"),
     addWordsButton: document.querySelector("#addWordsButton"),
+    openOcrModalButton: document.querySelector("#openOcrModalButton"),
+    ocrModal: document.querySelector("#ocrModal"),
+    closeOcrModalButton: document.querySelector("#closeOcrModalButton"),
+    cancelOcrButton: document.querySelector("#cancelOcrButton"),
+    ocrVideo: document.querySelector("#ocrVideo"),
+    ocrPreviewImage: document.querySelector("#ocrPreviewImage"),
+    ocrCameraPlaceholder: document.querySelector("#ocrCameraPlaceholder"),
+    ocrProgress: document.querySelector("#ocrProgress"),
+    ocrProgressText: document.querySelector("#ocrProgressText"),
+    capturePhotoButton: document.querySelector("#capturePhotoButton"),
+    choosePhotoButton: document.querySelector("#choosePhotoButton"),
+    retakePhotoButton: document.querySelector("#retakePhotoButton"),
+    ocrFileInput: document.querySelector("#ocrFileInput"),
+    ocrWordCount: document.querySelector("#ocrWordCount"),
+    ocrWordChips: document.querySelector("#ocrWordChips"),
+    ocrEmpty: document.querySelector("#ocrEmpty"),
+    selectAllOcrWordsButton: document.querySelector("#selectAllOcrWordsButton"),
+    clearOcrWordsButton: document.querySelector("#clearOcrWordsButton"),
+    addRecognizedWordsButton: document.querySelector("#addRecognizedWordsButton"),
     autoLookupToggle: document.querySelector("#autoLookupToggle"),
     autoFillButton: document.querySelector("#autoFillButton"),
     lookupStatus: document.querySelector("#lookupStatus"),
@@ -924,6 +948,302 @@
     }
   }
 
+  function setOcrProgress(message = "", visible = true) {
+    elements.ocrProgress.hidden = !visible;
+    elements.ocrProgressText.textContent = message || "正在识别";
+    if (visible) {
+      refreshIcons();
+    }
+  }
+
+  function stopOcrStream() {
+    if (ocrStream) {
+      ocrStream.getTracks().forEach((track) => track.stop());
+      ocrStream = null;
+    }
+    elements.ocrVideo.srcObject = null;
+  }
+
+  function resetOcrCapture() {
+    stopOcrStream();
+    ocrImageData = null;
+    ocrCandidates = [];
+    elements.ocrPreviewImage.hidden = true;
+    elements.ocrPreviewImage.removeAttribute("src");
+    elements.ocrVideo.hidden = false;
+    elements.ocrCameraPlaceholder.hidden = false;
+    elements.ocrCameraPlaceholder.querySelector("span").textContent = "相机预览";
+    elements.retakePhotoButton.hidden = true;
+    elements.capturePhotoButton.disabled = false;
+    elements.ocrFileInput.value = "";
+    elements.ocrWordChips.innerHTML = "";
+    elements.ocrWordCount.textContent = "0 个";
+    elements.ocrEmpty.hidden = false;
+    elements.addRecognizedWordsButton.disabled = true;
+    setOcrProgress("", false);
+  }
+
+  async function startOcrCamera() {
+    if (!navigator.mediaDevices?.getUserMedia) {
+      elements.capturePhotoButton.disabled = true;
+      elements.ocrCameraPlaceholder.querySelector("span").textContent = "相机不可用";
+      return;
+    }
+
+    try {
+      stopOcrStream();
+      ocrStream = await navigator.mediaDevices.getUserMedia({
+        audio: false,
+        video: {
+          facingMode: { ideal: "environment" },
+          width: { ideal: 1920 },
+          height: { ideal: 1080 },
+        },
+      });
+      elements.ocrVideo.srcObject = ocrStream;
+      elements.ocrVideo.hidden = false;
+      elements.ocrPreviewImage.hidden = true;
+      elements.ocrCameraPlaceholder.hidden = true;
+      elements.capturePhotoButton.disabled = false;
+      await elements.ocrVideo.play();
+    } catch {
+      stopOcrStream();
+      elements.capturePhotoButton.disabled = true;
+      elements.ocrCameraPlaceholder.hidden = false;
+      elements.ocrCameraPlaceholder.querySelector("span").textContent = "相机不可用";
+    }
+  }
+
+  function openOcrModal() {
+    resetOcrCapture();
+    elements.ocrModal.hidden = false;
+    document.body.classList.add("modal-open");
+    refreshIcons();
+    startOcrCamera();
+  }
+
+  function closeOcrModal() {
+    if (ocrBusy) {
+      return;
+    }
+    stopOcrStream();
+    elements.ocrModal.hidden = true;
+    document.body.classList.remove("modal-open");
+    setOcrProgress("", false);
+  }
+
+  function drawImageToCanvas(source, sourceWidth, sourceHeight) {
+    const maxSize = 1800;
+    const scale = Math.min(1, maxSize / Math.max(sourceWidth, sourceHeight));
+    const canvas = document.createElement("canvas");
+    canvas.width = Math.max(1, Math.round(sourceWidth * scale));
+    canvas.height = Math.max(1, Math.round(sourceHeight * scale));
+    canvas.getContext("2d", { willReadFrequently: true }).drawImage(source, 0, 0, canvas.width, canvas.height);
+    return canvas;
+  }
+
+  function showOcrImage(canvas) {
+    ocrImageData = canvas;
+    elements.ocrPreviewImage.src = canvas.toDataURL("image/jpeg", 0.92);
+    elements.ocrPreviewImage.hidden = false;
+    elements.ocrVideo.hidden = true;
+    elements.ocrCameraPlaceholder.hidden = true;
+    elements.retakePhotoButton.hidden = false;
+    stopOcrStream();
+  }
+
+  function captureOcrPhoto() {
+    if (!ocrStream || elements.ocrVideo.videoWidth === 0) {
+      showToast("相机还没有准备好。", "error");
+      return;
+    }
+
+    const canvas = drawImageToCanvas(
+      elements.ocrVideo,
+      elements.ocrVideo.videoWidth,
+      elements.ocrVideo.videoHeight,
+    );
+    showOcrImage(canvas);
+    runOcrRecognition();
+  }
+
+  function handleOcrFile(file) {
+    if (!file || !file.type.startsWith("image/")) {
+      showToast("请选择图片文件。", "error");
+      return;
+    }
+
+    const objectUrl = URL.createObjectURL(file);
+    const image = new Image();
+    image.onload = () => {
+      URL.revokeObjectURL(objectUrl);
+      const canvas = drawImageToCanvas(image, image.naturalWidth, image.naturalHeight);
+      showOcrImage(canvas);
+      runOcrRecognition();
+    };
+    image.onerror = () => {
+      URL.revokeObjectURL(objectUrl);
+      showToast("图片读取失败。", "error");
+    };
+    image.src = objectUrl;
+  }
+
+  function setOcrBusy(busy) {
+    ocrBusy = busy;
+    elements.capturePhotoButton.disabled = busy;
+    elements.choosePhotoButton.disabled = busy;
+    elements.retakePhotoButton.disabled = busy;
+    elements.closeOcrModalButton.disabled = busy;
+    elements.cancelOcrButton.disabled = busy;
+    elements.addRecognizedWordsButton.disabled =
+      busy || elements.ocrWordChips.querySelectorAll('input[type="checkbox"]:checked').length === 0;
+  }
+
+  async function ensureOcrWorker() {
+    if (!window.Tesseract?.createWorker) {
+      throw new Error("识别组件未加载，请检查网络。");
+    }
+
+    if (!ocrWorkerPromise) {
+      ocrWorkerPromise = window.Tesseract.createWorker("eng", 1, {
+        logger: (message) => {
+          if (message.status === "recognizing text") {
+            setOcrProgress(`正在识别 ${Math.round(message.progress * 100)}%`, true);
+          } else if (message.status === "loading language traineddata") {
+            setOcrProgress("正在下载识别数据", true);
+          } else if (
+            message.status === "loading tesseract core" ||
+            message.status === "initializing tesseract" ||
+            message.status === "initializing api"
+          ) {
+            setOcrProgress("正在加载识别引擎", true);
+          }
+        },
+      });
+    }
+
+    return ocrWorkerPromise;
+  }
+
+  async function runOcrRecognition() {
+    if (!ocrImageData || ocrBusy) {
+      return;
+    }
+
+    setOcrBusy(true);
+    setOcrProgress("正在准备识别", true);
+
+    try {
+      const worker = await ensureOcrWorker();
+      const result = await worker.recognize(ocrImageData);
+      ocrCandidates = extractOcrCandidates(result?.data?.text || "");
+      renderOcrCandidates();
+    } catch (error) {
+      ocrCandidates = [];
+      renderOcrCandidates();
+      showToast(error?.message || "图片识别失败。", "error");
+    } finally {
+      setOcrProgress("", false);
+      setOcrBusy(false);
+    }
+  }
+
+  function extractOcrCandidates(rawText) {
+    const ignoredWords = new Set([
+      "a", "an", "the", "and", "or", "but", "of", "to", "in", "on", "at", "by", "for",
+      "with", "from", "as", "is", "are", "was", "were", "be", "been", "being", "this",
+      "that", "these", "those", "it", "its", "not", "no", "yes", "page", "unit", "lesson",
+      "chapter", "word", "words", "vocabulary", "example", "examples", "list", "english",
+    ]);
+    const candidates = new Map();
+
+    function addCandidate(value) {
+      const cleaned = normalizeTerm(value)
+        .replace(/^[^A-Za-z]+/, "")
+        .replace(/[^A-Za-z'’-]+$/, "");
+      if (!/^[A-Za-z][A-Za-z'’-]{1,39}$/.test(cleaned)) {
+        return;
+      }
+      const key = cleaned.toLocaleLowerCase();
+      if (!ignoredWords.has(key) && !candidates.has(key)) {
+        candidates.set(key, cleaned);
+      }
+    }
+
+    String(rawText ?? "")
+      .split(/\r?\n/)
+      .map(cleanInputLine)
+      .filter(Boolean)
+      .forEach((line) => {
+        const explicitMatch = line.match(/^(.*?)\s*(?:=|＝|—|–|：|:|\t)\s*(.+)$/);
+        const spaceMatch = explicitMatch
+          ? null
+          : line.match(/^([A-Za-z][A-Za-z'’ -]{1,59})\s+(.+)$/);
+        const match = explicitMatch || spaceMatch;
+
+        if (match) {
+          addCandidate(match[1]);
+          return;
+        }
+
+        const tokens = line.match(/[A-Za-z][A-Za-z'’-]{1,39}/g) || [];
+        tokens.forEach(addCandidate);
+      });
+
+    return [...candidates.values()].slice(0, 120);
+  }
+
+  function renderOcrCandidates() {
+    elements.ocrWordChips.innerHTML = ocrCandidates
+      .map(
+        (term) => `
+          <label class="ocr-word-chip selected">
+            <input type="checkbox" value="${escapeHtml(term)}" checked />
+            <span>${escapeHtml(term)}</span>
+          </label>
+        `,
+      )
+      .join("");
+    elements.ocrEmpty.hidden = ocrCandidates.length > 0;
+    elements.ocrWordCount.textContent = `${ocrCandidates.length} 个`;
+    elements.addRecognizedWordsButton.disabled = ocrBusy || ocrCandidates.length === 0;
+    refreshIcons();
+  }
+
+  function updateOcrSelection() {
+    const checkedCount = elements.ocrWordChips.querySelectorAll('input[type="checkbox"]:checked').length;
+    elements.ocrWordCount.textContent = `${checkedCount} / ${ocrCandidates.length}`;
+    elements.addRecognizedWordsButton.disabled = ocrBusy || checkedCount === 0;
+  }
+
+  function setAllOcrWords(selected) {
+    elements.ocrWordChips.querySelectorAll('input[type="checkbox"]').forEach((input) => {
+      input.checked = selected;
+      input.closest(".ocr-word-chip").classList.toggle("selected", selected);
+    });
+    updateOcrSelection();
+  }
+
+  async function addRecognizedOcrWords() {
+    const selectedTerms = [...elements.ocrWordChips.querySelectorAll('input[type="checkbox"]:checked')]
+      .map((input) => input.value)
+      .filter(Boolean);
+
+    if (selectedTerms.length === 0) {
+      showToast("还没有选择单词。", "error");
+      return;
+    }
+
+    const existingLines = elements.wordInput.value
+      .split(/\r?\n/)
+      .map(cleanInputLine)
+      .filter(Boolean);
+    const combinedLines = [...new Set([...existingLines, ...selectedTerms])];
+    elements.wordInput.value = combinedLines.join("\n");
+    closeOcrModal();
+    await addWords();
+  }
+
   function clearWords() {
     if (state.words.length === 0) {
       showToast("词库已经是空的。");
@@ -990,6 +1310,32 @@
 
   function bindEvents() {
     elements.addWordsButton.addEventListener("click", () => addWords());
+    elements.openOcrModalButton.addEventListener("click", openOcrModal);
+    elements.closeOcrModalButton.addEventListener("click", closeOcrModal);
+    elements.cancelOcrButton.addEventListener("click", closeOcrModal);
+    elements.capturePhotoButton.addEventListener("click", captureOcrPhoto);
+    elements.choosePhotoButton.addEventListener("click", () => elements.ocrFileInput.click());
+    elements.retakePhotoButton.addEventListener("click", () => {
+      resetOcrCapture();
+      startOcrCamera();
+    });
+    elements.ocrFileInput.addEventListener("change", (event) => {
+      const [file] = event.target.files;
+      if (file) {
+        handleOcrFile(file);
+      }
+    });
+    elements.ocrWordChips.addEventListener("change", (event) => {
+      const input = event.target.closest('input[type="checkbox"]');
+      if (!input) {
+        return;
+      }
+      input.closest(".ocr-word-chip").classList.toggle("selected", input.checked);
+      updateOcrSelection();
+    });
+    elements.selectAllOcrWordsButton.addEventListener("click", () => setAllOcrWords(true));
+    elements.clearOcrWordsButton.addEventListener("click", () => setAllOcrWords(false));
+    elements.addRecognizedWordsButton.addEventListener("click", () => addRecognizedOcrWords());
     elements.autoFillButton.addEventListener("click", () => autoFillMissingMeanings());
     elements.autoLookupToggle.addEventListener("change", () => {
       lookupGeneration += 1;
@@ -1050,6 +1396,12 @@
     });
 
     window.addEventListener("keydown", (event) => {
+      if (!elements.ocrModal.hidden) {
+        if (event.key === "Escape") {
+          closeOcrModal();
+        }
+        return;
+      }
       if (elements.quizView.hidden || event.key !== "Escape" || event.target !== elements.answerInput) {
         return;
       }
