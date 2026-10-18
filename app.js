@@ -1042,9 +1042,123 @@
     return canvas;
   }
 
-  function showOcrImage(canvas) {
-    ocrImageData = canvas;
-    elements.ocrPreviewImage.src = canvas.toDataURL("image/jpeg", 0.92);
+  function prepareOcrCanvas(sourceCanvas) {
+    const minWidth = 1400;
+    const maxSize = 2400;
+    const largestSide = Math.max(sourceCanvas.width, sourceCanvas.height);
+    const scale = Math.max(1, Math.min(maxSize / largestSide, minWidth / largestSide));
+    const canvas = document.createElement("canvas");
+    canvas.width = Math.max(1, Math.round(sourceCanvas.width * scale));
+    canvas.height = Math.max(1, Math.round(sourceCanvas.height * scale));
+    const context = canvas.getContext("2d", { willReadFrequently: true });
+    context.imageSmoothingEnabled = true;
+    context.imageSmoothingQuality = "high";
+    context.drawImage(sourceCanvas, 0, 0, canvas.width, canvas.height);
+
+    const imageData = context.getImageData(0, 0, canvas.width, canvas.height);
+    const pixels = imageData.data;
+    const grayscale = new Float32Array(canvas.width * canvas.height);
+    const histogram = new Array(256).fill(0);
+
+    for (let index = 0; index < grayscale.length; index += 1) {
+      const offset = index * 4;
+      const gray = Math.round(
+        pixels[offset] * 0.2126 + pixels[offset + 1] * 0.7152 + pixels[offset + 2] * 0.0722,
+      );
+      grayscale[index] = gray;
+      histogram[gray] += 1;
+    }
+
+    const totalPixels = grayscale.length;
+    let lowCutoff = 0;
+    let highCutoff = 255;
+    let accumulated = 0;
+    const lowTarget = totalPixels * 0.02;
+    const highTarget = totalPixels * 0.98;
+
+    for (let value = 0; value < 256; value += 1) {
+      accumulated += histogram[value];
+      if (accumulated >= lowTarget) {
+        lowCutoff = value;
+        break;
+      }
+    }
+    accumulated = 0;
+    for (let value = 255; value >= 0; value -= 1) {
+      accumulated += histogram[value];
+      if (accumulated >= totalPixels - highTarget) {
+        highCutoff = value;
+        break;
+      }
+    }
+
+    const contrastRange = Math.max(1, highCutoff - lowCutoff);
+    for (let index = 0; index < grayscale.length; index += 1) {
+      const normalized = ((grayscale[index] - lowCutoff) / contrastRange) * 255;
+      grayscale[index] = Math.max(0, Math.min(255, normalized));
+    }
+
+    let borderSum = 0;
+    let borderCount = 0;
+    const borderStep = Math.max(1, Math.floor(Math.min(canvas.width, canvas.height) / 24));
+    for (let x = 0; x < canvas.width; x += borderStep) {
+      borderSum += grayscale[x] + grayscale[(canvas.height - 1) * canvas.width + x];
+      borderCount += 2;
+    }
+    for (let y = 0; y < canvas.height; y += borderStep) {
+      borderSum += grayscale[y * canvas.width] + grayscale[y * canvas.width + canvas.width - 1];
+      borderCount += 2;
+    }
+    const lightBackground = borderCount > 0 && borderSum / borderCount > 128;
+
+    const tileSize = 16;
+    const tilesX = Math.max(1, Math.ceil(canvas.width / tileSize));
+    const tilesY = Math.max(1, Math.ceil(canvas.height / tileSize));
+    const tileMeans = new Float32Array(tilesX * tilesY);
+
+    for (let tileY = 0; tileY < tilesY; tileY += 1) {
+      for (let tileX = 0; tileX < tilesX; tileX += 1) {
+        let sum = 0;
+        let count = 0;
+        const endX = Math.min(canvas.width, (tileX + 1) * tileSize);
+        const endY = Math.min(canvas.height, (tileY + 1) * tileSize);
+        for (let y = tileY * tileSize; y < endY; y += 1) {
+          for (let x = tileX * tileSize; x < endX; x += 1) {
+            sum += grayscale[y * canvas.width + x];
+            count += 1;
+          }
+        }
+        tileMeans[tileY * tilesX + tileX] = count > 0 ? sum / count : 128;
+      }
+    }
+
+    const thresholdOffset = 9;
+    for (let y = 0; y < canvas.height; y += 1) {
+      const tileY = Math.min(tilesY - 1, Math.floor(y / tileSize));
+      for (let x = 0; x < canvas.width; x += 1) {
+        const tileX = Math.min(tilesX - 1, Math.floor(x / tileSize));
+        const index = y * canvas.width + x;
+        const mean = tileMeans[tileY * tilesX + tileX];
+        const threshold = lightBackground ? mean - thresholdOffset : mean + thresholdOffset;
+        const isForeground = lightBackground
+          ? grayscale[index] < threshold
+          : grayscale[index] > threshold;
+        const value = isForeground ? 0 : 255;
+        const offset = index * 4;
+        pixels[offset] = value;
+        pixels[offset + 1] = value;
+        pixels[offset + 2] = value;
+        pixels[offset + 3] = 255;
+      }
+    }
+
+    context.putImageData(imageData, 0, 0);
+    return canvas;
+  }
+
+  function showOcrImage(displayCanvas, recognitionCanvas) {
+    ocrImageData = recognitionCanvas || displayCanvas;
+    elements.ocrPreviewImage.src = displayCanvas.toDataURL("image/jpeg", 0.92);
     elements.ocrPreviewImage.hidden = false;
     elements.ocrVideo.hidden = true;
     elements.ocrCameraPlaceholder.hidden = true;
@@ -1058,12 +1172,13 @@
       return;
     }
 
-    const canvas = drawImageToCanvas(
+    const rawCanvas = drawImageToCanvas(
       elements.ocrVideo,
       elements.ocrVideo.videoWidth,
       elements.ocrVideo.videoHeight,
     );
-    showOcrImage(canvas);
+    const preparedCanvas = prepareOcrCanvas(rawCanvas);
+    showOcrImage(rawCanvas, preparedCanvas);
     runOcrRecognition();
   }
 
@@ -1077,8 +1192,9 @@
     const image = new Image();
     image.onload = () => {
       URL.revokeObjectURL(objectUrl);
-      const canvas = drawImageToCanvas(image, image.naturalWidth, image.naturalHeight);
-      showOcrImage(canvas);
+      const rawCanvas = drawImageToCanvas(image, image.naturalWidth, image.naturalHeight);
+      const preparedCanvas = prepareOcrCanvas(rawCanvas);
+      showOcrImage(rawCanvas, preparedCanvas);
       runOcrRecognition();
     };
     image.onerror = () => {
@@ -1135,8 +1251,17 @@
 
     try {
       const worker = await ensureOcrWorker();
-      const result = await worker.recognize(ocrImageData);
-      ocrCandidates = extractOcrCandidates(result?.data?.text || "");
+      await worker.setParameters({
+        tessedit_pageseg_mode: window.Tesseract.PSM?.SPARSE_TEXT || "11",
+        preserve_interword_spaces: "1",
+        tessedit_char_whitelist: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz'’'- ",
+      });
+      const result = await worker.recognize(ocrImageData, {}, { text: true, blocks: true });
+      ocrCandidates = extractOcrCandidates(
+        result?.data?.text || "",
+        result?.data?.blocks || [],
+        ocrImageData.width,
+      );
       renderOcrCandidates();
     } catch (error) {
       ocrCandidates = [];
@@ -1148,25 +1273,79 @@
     }
   }
 
-  function extractOcrCandidates(rawText) {
+  function extractOcrCandidates(rawText, blocks, imageWidth) {
     const ignoredWords = new Set([
       "a", "an", "the", "and", "or", "but", "of", "to", "in", "on", "at", "by", "for",
       "with", "from", "as", "is", "are", "was", "were", "be", "been", "being", "this",
       "that", "these", "those", "it", "its", "not", "no", "yes", "page", "unit", "lesson",
       "chapter", "word", "words", "vocabulary", "example", "examples", "list", "english",
+      "complete", "oxford", "course", "reading", "writing", "spelling", "pronunciation",
+      "translation", "definition", "exercise", "exercises", "practice", "textbook",
     ]);
     const candidates = new Map();
 
-    function addCandidate(value) {
+    function addCandidate(value, confidence = 100) {
       const cleaned = normalizeTerm(value)
         .replace(/^[^A-Za-z]+/, "")
         .replace(/[^A-Za-z'’-]+$/, "");
       if (!/^[A-Za-z][A-Za-z'’-]{1,39}$/.test(cleaned)) {
         return;
       }
+      if (/^[A-Z]{2,3}$/.test(cleaned)) {
+        return;
+      }
+      if (Number(confidence) < 60) {
+        return;
+      }
       const key = cleaned.toLocaleLowerCase();
       if (!ignoredWords.has(key) && !candidates.has(key)) {
         candidates.set(key, cleaned);
+      }
+    }
+
+    const collectedLines = [];
+    function collectLines(block) {
+      block?.paragraphs?.forEach((paragraph) => {
+        paragraph?.lines?.forEach((line) => collectedLines.push(line));
+      });
+    }
+    blocks?.forEach(collectLines);
+
+    if (collectedLines.length > 0) {
+      const confidenceThreshold = 55;
+      collectedLines.forEach((line) => {
+        const words = (line.words || [])
+          .filter(
+            (word) =>
+              word?.text &&
+              (word.confidence == null || Number(word.confidence) >= confidenceThreshold),
+          )
+          .sort((first, second) => (first.bbox?.x0 || 0) - (second.bbox?.x0 || 0));
+
+        if (words.length === 0) {
+          return;
+        }
+
+        const firstWord = words[0];
+        const secondWord = words[1];
+        const firstX = firstWord.bbox?.x0 || 0;
+        const secondX = secondWord?.bbox?.x0 || firstX;
+        const gap = secondX - firstX;
+        const prioritizesFirstTerm =
+          words.length > 1 &&
+          gap > Math.max(24, (imageWidth || 1200) * 0.06) &&
+          (firstWord.confidence == null || Number(firstWord.confidence) >= 65);
+
+        if (prioritizesFirstTerm) {
+          addCandidate(firstWord.text, firstWord.confidence);
+          return;
+        }
+
+        words.forEach((word) => addCandidate(word.text, word.confidence));
+      });
+
+      if (candidates.size >= 2) {
+        return [...candidates.values()].slice(0, 120);
       }
     }
 
